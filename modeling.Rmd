@@ -1,7 +1,7 @@
 ---
 title: "Modeling ecologically different species"
 author: "Rilquer Mascarenhas"
-date: "4/14/2020"
+date: "5/01/2020"
 output:
   pdf_document: default
   html_document: default
@@ -10,9 +10,6 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-
-
-Following lab 5
 
 First, use the following commands to avoid Java errors:
 
@@ -32,11 +29,7 @@ library(spThin)
 library(dismo)
 library(ENMeval)
 library(dplyr)
-library(wallace)
 library(maps)
-
-#Also loading some necessary functions from Wallace package:
-source(system.file('shiny/funcs', 'functions.R', package = 'wallace'))
 ```
 
 Now loading occurence data:
@@ -61,31 +54,34 @@ Reading environmental data, BR shapefiles and setting other geographical boundar
 
 ```{r, results = "hide", warning = FALSE, message = FALSE}
 br <- crop(readOGR(dsn = 'data/br/', layer = 'br'),enclaves_extent)
-enclaves_extent<-extent(-41,-34,-8,-2)
-env <- crop(stack(list.files(path = 'data/wc0-5/', pattern = '\\.tif$', full.names = T)),
-            enclaves_extent)
+# Getting environmental data
+env <- list()
+periods.names <- c('Present','Late Holocene (0.3 - 4.2 ka)','Middle Holocene (4.2 - 8.326 ka) ',
+             'Early Holocene (8.326 - 11.7 ka)','Younger Dryas Stadial (11.7 ka - 12.9 ka)',
+             'Bølling-Allerød (12.9 ka - 14.7 ka)','Heinrich Stadial 1 (14.7 ka - 17 ka)',
+             'Last Glacial Maximum (ca. 21 ka)','Last Interglacial (ca. 130 ka)')
+periods <- c('01_cur','02_LH','03_MH','04_EH','05_YDS','06_BA','07_HS','08_LGM','09_LIG')
+folders <- list.dirs('data/bioclim')[-1]
+for (i in 1:length(folders)) {
+  env[[i]] <- crop(stack(list.files(path = paste0(folders[i]), pattern = ".tif$", full.names = T)),
+                   enclaves_extent)
+}
 ```
 
 Getting background points through minimum convex polygon:
 
 ```{r, results = "hide", warning = FALSE, message = FALSE}
-##Creating directory to save wallace outputs
 # Creating empty lists
 bgExt <- list()
-envsBgCrop <- list()
 envsBgMsk <- list()
 bg.xy <- list()
 
 for (i in 1:length(occs.xy)) {
-  bgExt[[i]] <- mcp(occs.xy[[i]])
-  bgExt[[i]] <- rgeos::gBuffer(bgExt[[i]], width = 0.5)
+  bgExt[[i]] <- rgeos::gBuffer(occs.xy[[i]], width = 0.5)
   
-  # crop the environmental rasters by the background extent shape
-  envsBgCrop[[i]] <- raster::crop(env, bgExt[[i]])
-  # mask the background extent shape from the cropped raster
-  envsBgMsk[[i]] <- raster::mask(envsBgCrop[[i]], bgExt[[i]])
-  # sample random background points
-  bg.xy[[i]] <- dismo::randomPoints(envsBgMsk[[i]], 500)
+  # mask the environmental rasters by the background extent shape
+  envsBgMsk[[i]] <- raster::mask(env[[1]], bgExt[[i]])
+  bg.xy[[i]] <- dismo::randomPoints(envsBgMsk[[i]], 1000)
   # convert matrix output to data frame
   bg.xy[[i]] <- as.data.frame(bg.xy[[i]])
   plot(br)
@@ -98,106 +94,117 @@ for (i in 1:length(occs.xy)) {
 }
 ```
 
-Running bioclim:
+Running ENMeval to evaluate different Maxent models:
 
-```{r, results = "hide", warning = FALSE, message = FALSE}
-presvals <- list()
-bc <- list()
-bc.projections <- list()
+```{r, results = "hide", warning = FALSE, message = FALSE, eval = FALSE}
+ev <- list()
+best <- list()
+# Creating optimize function
+optimize <- function(res) {
+  ###Remove any candidate model which has an AUC less than 0.51= models with no discrimination
+  opt.auc <- res[res[,4] >= 0.5,]
+  ###Remove any candidates which have no parameters
+  no.param <- opt.auc[opt.auc[,13] > 1,]
+  ###Remove any candidates where the AIC score was NA (too many parameters)
+  noAICNA<- no.param[which(!is.na(no.param$AICc)),]
+  ###Remove any models which have an OR of zero
+  noOR0 <- noAICNA[noAICNA[,9] != 0,]
+  ###Order the remaining list by lowest OR then highest AUC, sequentially
+  ordered<-noOR0[with(noOR0, order(avg.test.or10pct, -avg.test.AUC)), ]
+  ###Grab the settings of that first model (the optimal model)
+  ordered[1,]
+}
+
 for (i in 1:length(occs.xy)) {
-  message('Extracting environmental values for presence points of ',spp[i])
-  presvals[[i]] <- extract(envsBgMsk[[i]], occs.xy[[i]])
-  message('Running bioclim for ',spp[i])
-  bc[[i]] <- bioclim(presvals[[i]])
-  bc.projections[[i]] <- predict(env, bc[[i]])
+  ev[[i]]<-ENMevaluate(occ = occs.xy[[i]], env = env[[1]], bg.coords = bg.xy[[i]],
+                       RMvalues = seq(1,5,0.5), fc = c("L","LQ","H","LQH"),
+                       method = "checkerboard2", n.bg = 1000, rasterPreds = T, parallel = T,
+                       numCores = 8, algorithm = 'maxent.jar')
+  best[[i]]<-optimize(ev[[i]]@results)
 }
-```
 
-Plotting and saving bioclim models:
+##Creating a data frame with the best model for each species
 
-```{r, results = "hide", warning = FALSE, message = FALSE}
-dir.create('output/bioclim_models')
-dir.create('output/bioclim_models/current')
-for (i in 1:length(bc.projections)) {
-  par(bty='n')
-  r.range <- c(min(na.omit(values(bc.projections[[i]]))),max(na.omit(values(bc.projections[[i]]))))
-  plot(bc.projections[[i]], axes=FALSE,legend.width=1,
-       axis.args=list(at=round(seq(r.range[1], r.range[2], 0.1),2),
-                      labels=round(seq(r.range[1], r.range[2], 0.1),2)),
-       legend.args=list(text='Suitability', side=4, font=2, line=-2, cex=0.8))
-  map.scale(x=-37, y=-3, ratio=FALSE, relwidth=0.25)
-  title(paste0(spp[i],' - Bioclim Current'))
-  dev.copy(tiff,filename=paste0('output/bioclim_models/current/',spp[i],'.tif'),
-           width = 6, height = 5, units = "in", res = 500)
-  dev.off()
-}
+best.models <- data.frame(species = spp,
+                           betamultipliers = c('5','4','1','5'),
+                           linear = c('true','false','true','true'),
+                           quadratic = c('true','false','false','true'),
+                           hinge = c('false','true','false','true'))
 ```
 
 Running Maxent models:
 
-```{r, results = "hide", warning = FALSE, message = FALSE}
+```{r, results = "hide", warning = FALSE, message = FALSE, eval = FALSE}
 ##Calibrating model
 dir.create('output/maxent_models/')
 mod <- list()
 for (i in 1:length(spp)) {
   dir.create(paste0('output/maxent_models/',spp[i]))
   mod[[i]] <- maxent(
-    x=env, # bio stack
+    x=env[[1]], # bio stack
     p=occs.xy[[i]], # locality csv
     factors = NULL,
     path = paste0('output/maxent_models/',spp[i]),
-    args=c(
-      'betamultiplier=0.5',
-      'linear=true',
-      #'quadratic=false',
-      #'product=false',
-      #'threshold=p10',
-      #'hinge=false',
-      'threads=8',
-      'responsecurves=true',
-      'jackknife=true',
-      'askoverwrite=false',
-      'autofeature=true'
+    args=c(paste0('betamultiplier=',best.models[i,2]),
+           paste0('linear=',best.models[i,3]),
+           paste0('quadratic=',best.models[i,4]),
+           paste0('hinge=',best.models[i,3]),
+           'product=false',
+           'threshold=false',
+           'threads=8',
+           'responsecurves=true',
+           'jackknife=true',
+           'askoverwrite=false',
+           'autofeature=false')
     )
-  )
 }
 
-##Projecting into current conditions
-dir.create('output/maxent_models/current/')
-pred.mod <- list()
-for (i in 1:length(spp)) {
-  pred.mod[[i]] <- predict(
-    object = mod[[i]],
-    x = env,
-    filename = paste0('output/maxent_models/current/',spp[i],'.asc'),
-    na.rm = T,
-    format = 'ascii',#or GTiff
-    overwrite = F,
-    args = "logistic"
-  )
+##Linear = false did not work
+```
+
+Now projecting into different periods
+
+```{r, results = "hide", warning = FALSE, message = FALSE, eval = FALSE}
+dir.create('output/projections/')
+proj <- list()
+for (j in 1:length(periods)) {
+  dir.create(paste0('output/projections/',periods[j]))
+  proj[[j]] <- list()
+  for (i in 1:length(spp)) {
+    proj[[j]][[i]] <- predict(
+      object = mod[[i]],
+      x = env[[j]],
+      filename = paste0('output/projections/',periods[j],'/',spp[i],'.asc'),
+      na.rm = T,
+      format = 'ascii',#or GTiff
+      overwrite = F,
+      args = "logistic"
+    )
+  }
 }
 ```
 
 Reading output asc files and plotting results:
 
 ```{r, results = "hide", warning = FALSE, message = FALSE}
-mxt.current <- list()
-files <- list.files(path = 'output/maxent_models/current/', pattern = '.asc', full.names = T)
-for (i in files) {
-  mxt.current[[i]] <- raster(i)
+mxt <- list()
+for (i in 1:length(periods)) {
+  mxt[[i]] <- list()
+  files <- list.files(path = paste0('output/maxent_models/',periods[i]), pattern = '.asc', full.names = T)
+  mxt[[i]] <- stack(files)
 }
-
-for (i in 1:length(mxt.current)) {
-  par(bty='n')
-  r.range <- c(min(na.omit(values(mxt.current[[i]]))),max(na.omit(values(mxt.current[[i]]))))
-  plot(mxt.current[[i]], axes=FALSE,legend.width=1,
+dir.create('output/maps/')
+library(RColorBrewer)
+for (i in 1:length(mxt)) {
+  par(bty='n', oma = c(0, 0, 2, 0))
+  r.range <- c(min(na.omit(values(mxt[[i]]))),max(na.omit(values(mxt[[i]]))))
+  plot(mxt[[i]], col = rev(brewer.pal(11, 'Spectral')), axes=FALSE,legend.width=1,
        axis.args=list(at=round(seq(r.range[1], r.range[2], 0.1),2),
                       labels=round(seq(r.range[1], r.range[2], 0.1),2)),
        legend.args=list(text='Suitability', side=4, font=2, line=-2, cex=0.8))
-  map.scale(x=-37, y=-3, ratio=FALSE, relwidth=0.25)
-  title(paste0(spp[i],' - Maxent Current'))
-  dev.copy(tiff,filename=paste0('output/maxent_models/current/',spp[i],'.tif'),
-           width = 6, height = 5, units = "in", res = 500)
+  title(periods.names[[i]], outer = TRUE, line = 0.2)
+  dev.copy(tiff,filename=paste0('output/maps/',periods[i],'.tif'),
+           width = 10, height = 6, units = "in", res = 500)
   dev.off()
 }
 ```
@@ -205,23 +212,7 @@ for (i in 1:length(mxt.current)) {
 ## Part two: testing niche equivalency
 
 ```{r}
-require(dismo)
-require(ENMeval)
-require(phyloclim)
-require(sp)
-require(rgdal)
-require(rgeos)
-devtools::install_github("danlwarren/ENMTools")
-library(ENMTools)
 
-#### Niche comparisons using Schoener's D. 
-# Load two rasters to compare
-r1<-raster('output/maxent_models/current/Pathway/to/first/raster.tif') # can be any raster type (i.e. .asci, .tif, .bil)
-r2<-raster('Pathway/to/second/raster.tif')
-flav<-raster("C:/Users/pgalante/Documents/Projects/QGIS_tutorial/RGGS_GIS/Session6_data/E_m_flavifrons.asc")
-mac<-raster("C:/Users/pgalante/Documents/Projects/QGIS_tutorial/RGGS_GIS/Session6_data/E_m_macaco.asc")
-
-Overlap <- nicheOverlap(r1, r2, stat='I', mask=TRUE, checkNegatives=TRUE)
 
 ```
 
