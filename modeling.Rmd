@@ -1,0 +1,228 @@
+---
+title: "Modeling ecologically different species"
+author: "Rilquer Mascarenhas"
+date: "4/14/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Following lab 5
+
+First, use the following commands to avoid Java errors:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+library(rJava)
+options(java.parameters = "-Xmx1g")
+```
+
+Then load *dismo* and other necessary packages:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+library(raster)
+library(rgdal)
+library(rgeos)
+library(spocc)
+library(spThin)
+library(dismo)
+library(ENMeval)
+library(dplyr)
+library(wallace)
+library(maps)
+
+#Also loading some necessary functions from Wallace package:
+source(system.file('shiny/funcs', 'functions.R', package = 'wallace'))
+```
+
+Now loading occurence data:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+spp <- c('Cassia ferruginea','Myrcia silvatica', 'Scinax nebulosus','Sclerurus cearensis')
+colors <- c('green','orange','purple','blue')
+occs.xy <- list()
+occs.xy[[1]] <- read.csv("data/occs/cassia_ferruginea.csv")
+occs.xy[[2]] <- read.csv("data/occs/myrcia_silvatica.csv")
+occs.xy[[3]] <- read.csv("data/occs/s_nebulosus.csv")
+occs.xy[[4]] <- read.csv("data/occs/s_cearensis.csv")
+enclaves_extent <- extent(-41, -34,-8,-2)
+for (i in 1:length(occs.xy)) {
+  colnames(occs.xy[[i]]) <- c('longitude','latitude')
+  sp::coordinates(occs.xy[[i]]) <- ~ longitude + latitude
+  occs.xy[[i]] <- crop(occs.xy[[i]],enclaves_extent)
+}
+```
+
+Reading environmental data, BR shapefiles and setting other geographical boundaries:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+br <- crop(readOGR(dsn = 'data/br/', layer = 'br'),enclaves_extent)
+enclaves_extent<-extent(-41,-34,-8,-2)
+env <- crop(stack(list.files(path = 'data/wc0-5/', pattern = '\\.tif$', full.names = T)),
+            enclaves_extent)
+```
+
+Getting background points through minimum convex polygon:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+##Creating directory to save wallace outputs
+# Creating empty lists
+bgExt <- list()
+envsBgCrop <- list()
+envsBgMsk <- list()
+bg.xy <- list()
+
+for (i in 1:length(occs.xy)) {
+  bgExt[[i]] <- mcp(occs.xy[[i]])
+  bgExt[[i]] <- rgeos::gBuffer(bgExt[[i]], width = 0.5)
+  
+  # crop the environmental rasters by the background extent shape
+  envsBgCrop[[i]] <- raster::crop(env, bgExt[[i]])
+  # mask the background extent shape from the cropped raster
+  envsBgMsk[[i]] <- raster::mask(envsBgCrop[[i]], bgExt[[i]])
+  # sample random background points
+  bg.xy[[i]] <- dismo::randomPoints(envsBgMsk[[i]], 500)
+  # convert matrix output to data frame
+  bg.xy[[i]] <- as.data.frame(bg.xy[[i]])
+  plot(br)
+  points(bg.xy[[i]], col = 'black', pch = 20)
+  points(occs.xy[[i]], col = colors[i], pch = 20)
+  title(paste0(spp[i],' - Presence and Background'))
+  dev.copy(tiff,filename=paste0('output/',spp[i],' - Presence and Background.tif'),
+           width = 6, height = 5, units = "in", res = 500)
+  dev.off()
+}
+```
+
+Running bioclim:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+presvals <- list()
+bc <- list()
+bc.projections <- list()
+for (i in 1:length(occs.xy)) {
+  message('Extracting environmental values for presence points of ',spp[i])
+  presvals[[i]] <- extract(envsBgMsk[[i]], occs.xy[[i]])
+  message('Running bioclim for ',spp[i])
+  bc[[i]] <- bioclim(presvals[[i]])
+  bc.projections[[i]] <- predict(env, bc[[i]])
+}
+```
+
+Plotting and saving bioclim models:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+dir.create('output/bioclim_models')
+dir.create('output/bioclim_models/current')
+for (i in 1:length(bc.projections)) {
+  par(bty='n')
+  r.range <- c(min(na.omit(values(bc.projections[[i]]))),max(na.omit(values(bc.projections[[i]]))))
+  plot(bc.projections[[i]], axes=FALSE,legend.width=1,
+       axis.args=list(at=round(seq(r.range[1], r.range[2], 0.1),2),
+                      labels=round(seq(r.range[1], r.range[2], 0.1),2)),
+       legend.args=list(text='Suitability', side=4, font=2, line=-2, cex=0.8))
+  map.scale(x=-37, y=-3, ratio=FALSE, relwidth=0.25)
+  title(paste0(spp[i],' - Bioclim Current'))
+  dev.copy(tiff,filename=paste0('output/bioclim_models/current/',spp[i],'.tif'),
+           width = 6, height = 5, units = "in", res = 500)
+  dev.off()
+}
+```
+
+Running Maxent models:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+##Calibrating model
+dir.create('output/maxent_models/')
+mod <- list()
+for (i in 1:length(spp)) {
+  dir.create(paste0('output/maxent_models/',spp[i]))
+  mod[[i]] <- maxent(
+    x=env, # bio stack
+    p=occs.xy[[i]], # locality csv
+    factors = NULL,
+    path = paste0('output/maxent_models/',spp[i]),
+    args=c(
+      'betamultiplier=0.5',
+      'linear=true',
+      #'quadratic=false',
+      #'product=false',
+      #'threshold=p10',
+      #'hinge=false',
+      'threads=8',
+      'responsecurves=true',
+      'jackknife=true',
+      'askoverwrite=false',
+      'autofeature=true'
+    )
+  )
+}
+
+##Projecting into current conditions
+dir.create('output/maxent_models/current/')
+pred.mod <- list()
+for (i in 1:length(spp)) {
+  pred.mod[[i]] <- predict(
+    object = mod[[i]],
+    x = env,
+    filename = paste0('output/maxent_models/current/',spp[i],'.asc'),
+    na.rm = T,
+    format = 'ascii',#or GTiff
+    overwrite = F,
+    args = "logistic"
+  )
+}
+```
+
+Reading output asc files and plotting results:
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+mxt.current <- list()
+files <- list.files(path = 'output/maxent_models/current/', pattern = '.asc', full.names = T)
+for (i in files) {
+  mxt.current[[i]] <- raster(i)
+}
+
+for (i in 1:length(mxt.current)) {
+  par(bty='n')
+  r.range <- c(min(na.omit(values(mxt.current[[i]]))),max(na.omit(values(mxt.current[[i]]))))
+  plot(mxt.current[[i]], axes=FALSE,legend.width=1,
+       axis.args=list(at=round(seq(r.range[1], r.range[2], 0.1),2),
+                      labels=round(seq(r.range[1], r.range[2], 0.1),2)),
+       legend.args=list(text='Suitability', side=4, font=2, line=-2, cex=0.8))
+  map.scale(x=-37, y=-3, ratio=FALSE, relwidth=0.25)
+  title(paste0(spp[i],' - Maxent Current'))
+  dev.copy(tiff,filename=paste0('output/maxent_models/current/',spp[i],'.tif'),
+           width = 6, height = 5, units = "in", res = 500)
+  dev.off()
+}
+```
+
+## Part two: testing niche equivalency
+
+```{r}
+require(dismo)
+require(ENMeval)
+require(phyloclim)
+require(sp)
+require(rgdal)
+require(rgeos)
+devtools::install_github("danlwarren/ENMTools")
+library(ENMTools)
+
+#### Niche comparisons using Schoener's D. 
+# Load two rasters to compare
+r1<-raster('output/maxent_models/current/Pathway/to/first/raster.tif') # can be any raster type (i.e. .asci, .tif, .bil)
+r2<-raster('Pathway/to/second/raster.tif')
+flav<-raster("C:/Users/pgalante/Documents/Projects/QGIS_tutorial/RGGS_GIS/Session6_data/E_m_flavifrons.asc")
+mac<-raster("C:/Users/pgalante/Documents/Projects/QGIS_tutorial/RGGS_GIS/Session6_data/E_m_macaco.asc")
+
+Overlap <- nicheOverlap(r1, r2, stat='I', mask=TRUE, checkNegatives=TRUE)
+
+```
+
+
