@@ -1,4 +1,3 @@
-
 library(rJava)
 options(java.parameters = "-Xmx1g")
 library(raster)
@@ -9,7 +8,6 @@ library(spThin)
 library(dismo)
 library(ENMeval)
 library(dplyr)
-library(wallace)
 library(maps)
 
 #Also loading some necessary functions from Wallace package:
