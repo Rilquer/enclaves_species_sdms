@@ -34,8 +34,18 @@ for (i in 1:length(occs.xy)) {
 
 enclaves_extent <- extent(-41, -34,-8,-2)
 br <- crop(readOGR(dsn = 'data/br/', layer = 'br'),enclaves_extent)
-env <- crop(stack(list.files(path = 'data/wc0-5/', pattern = '\\.tif$', full.names = T)),
-            enclaves_extent)
+# Getting environmental data
+env <- list()
+periods <- c('Present','Late Holocene (0.3 - 4.2 ka)','Middle Holocene (4.2 - 8.326 ka) ',
+             'Early Holocene (8.326 - 11.7 ka)','Younger Dryas Stadial (11.7 ka - 12.9 ka)',
+             'Bølling-Allerød (12.9 ka - 14.7 ka)','Heinrich Stadial 1 (14.7 ka - 17 ka)',
+             'Last Glacial Maximum (ca. 21 ka)','Last Interglacial (ca. 130 ka)',
+             'MIS19 (ca. 787 ka)')
+folders <- list.dirs('data/bioclim')[-1]
+for (i in 1:length(folders)) {
+  env[[i]] <- crop(stack(list.files(path = paste0(folders[i]), pattern = ".tif$", full.names = T)),
+                   enclaves_extent)
+}
 
 ## Getting background points through minimum convex polygon:
 
@@ -50,7 +60,7 @@ for (i in 1:length(occs.xy)) {
   bgExt[[i]] <- rgeos::gBuffer(bgExt[[i]], width = 0.5)
   
   # crop the environmental rasters by the background extent shape
-  envsBgCrop[[i]] <- raster::crop(env, bgExt[[i]])
+  envsBgCrop[[i]] <- raster::crop(env[[1]], bgExt[[i]])
   # mask the background extent shape from the cropped raster
   envsBgMsk[[i]] <- raster::mask(envsBgCrop[[i]], bgExt[[i]])
   # sample random background points
@@ -62,35 +72,6 @@ for (i in 1:length(occs.xy)) {
   points(occs.xy[[i]], col = colors[i], pch = 20)
   title(paste0(spp[i],' - Presence and Background'))
   dev.copy(tiff,filename=paste0('output/',spp[i],' - Presence and Background.tif'),
-           width = 6, height = 5, units = "in", res = 500)
-  dev.off()
-}
-
-#Running bioclim:
-presvals <- list()
-bc <- list()
-bc.projections <- list()
-for (i in 1:length(occs.xy)) {
-  message('Extracting environmental values for presence points of ',spp[i])
-  presvals[[i]] <- extract(env, occs.xy[[i]])
-  message('Running bioclim for ',spp[i])
-  bc[[i]] <- bioclim(presvals[[i]])
-  bc.projections[[i]] <- predict(env, bc[[i]])
-}
-
-# Plotting and saving bioclim models:
-dir.create('output/bioclim_models')
-dir.create('output/bioclim_models/current')
-for (i in 1:length(bc.projections)) {
-  par(bty='n')
-  r.range <- c(min(na.omit(values(bc.projections[[i]]))),max(na.omit(values(bc.projections[[i]]))))
-  plot(bc.projections[[i]], axes=FALSE,legend.width=1,
-       axis.args=list(at=round(seq(r.range[1], r.range[2], 0.1),2),
-                      labels=round(seq(r.range[1], r.range[2], 0.1),2)),
-       legend.args=list(text='Suitability', side=4, font=2, line=-2, cex=0.8))
-  map.scale(x=-37, y=-3, ratio=FALSE, relwidth=0.25)
-  title(paste0(spp[i],' - Bioclim Current'))
-  dev.copy(tiff,filename=paste0('output/bioclim_models/current/',spp[i],'.tif'),
            width = 6, height = 5, units = "in", res = 500)
   dev.off()
 }
